@@ -8,8 +8,9 @@
 
 표준 라이브러리만 사용한다. pip install 필요 없음.
 
-  python3 cgv_imax_watch.py --probe          # 어떤 엔드포인트가 살아있는지 진단
+  python3 cgv_imax_watch.py --probe          # 엔드포인트 생존 진단
   python3 cgv_imax_watch.py --selftest       # 네트워크 없이 탐지 로직 검증
+  python3 cgv_imax_watch.py --dump out.json  # 응답 원문 저장 (구조 확인용)
   python3 cgv_imax_watch.py --once           # 1회 확인 (cron/launchd 용)
   python3 cgv_imax_watch.py                  # 상주하며 주기적으로 확인
 """
@@ -39,26 +40,25 @@ THEATERS = {
     "0059": "CGV 영등포 (타임스퀘어)",
 }
 
-# 상영시간표를 담고 있을 법한 후보 엔드포인트. {theater}=극장코드, {date}=YYYYMMDD.
-# CGV가 사이트를 개편하면서 어떤 게 살아있는지 달라질 수 있어, --probe 로 먼저
-# 확인한 뒤 --endpoint 로 고정해 쓰는 것을 권한다.
-CANDIDATE_ENDPOINTS = [
+# 개편된 CGV 사이트가 실제로 쓰는 시간표 API. 브라우저 개발자도구에서
+# 확인한 것으로, GET + JSON 응답이다. {theater}=siteNo, {date}=YYYYMMDD.
+CGV_API = (
+    "https://cgv.co.kr/api/v1/booking/searchMovScnInfo"
+    "?coCd={co}&siteNo={theater}&scnYmd={date}&rtctlScopCd={scope}"
+)
+
+# API가 막히거나 바뀌었을 때를 대비한 구 엔드포인트들.
+LEGACY_ENDPOINTS = [
     "https://www.cgv.co.kr/common/showtimes/iframeTheater.aspx"
-    "?areacode=01&theatercode={theater}&date={date}",
-    "http://www.cgv.co.kr/common/showtimes/iframeTheater.aspx"
     "?areacode=01&theatercode={theater}&date={date}",
     "https://m.cgv.co.kr/WebApp/ScheduleV4/schedule.aspx?tc={theater}&date={date}",
 ]
 
-BOOKING_URLS = {
-    "0013": "https://www.cgv.co.kr/ticket/?theaterCode=0013",
-    "0059": "https://www.cgv.co.kr/ticket/?theaterCode=0059",
-}
-BOOKING_FALLBACK = "https://cgv.co.kr/cnm/movieBook/cinema"
+BOOKING_URL = "https://cgv.co.kr/cnm/movieBook/cinema"
 
 USER_AGENT = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
 )
 
 # 서버에 부담 주지 않도록 최소 간격을 둔다.
@@ -68,6 +68,7 @@ TAG_RE = re.compile(r"<[^>]+>")
 SCRIPT_RE = re.compile(r"<(script|style)\b.*?</\1>", re.S | re.I)
 WS_RE = re.compile(r"\s+")
 TIME_RE = re.compile(r"\b([01]?\d|2[0-3]):[0-5]\d\b")
+HHMM_RE = re.compile(r"^([01]\d|2[0-3])[0-5]\d$")  # "1930" 같은 API 표기
 SEAT_RE = re.compile(r"(\d+)\s*/\s*(\d+)")
 
 
@@ -75,19 +76,31 @@ SEAT_RE = re.compile(r"(\d+)\s*/\s*(\d+)")
 # HTTP
 # --------------------------------------------------------------------------
 
-def fetch(url: str, timeout: float = 15.0, retries: int = 3) -> tuple[int, str]:
+def build_headers(cookie: str | None) -> dict:
+    """브라우저가 보내는 것과 같은 헤더. Cloudflare 앞단을 통과하기 위함."""
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "ko-KR,ko;q=0.9",
+        "Referer": BOOKING_URL,
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
+    if cookie:
+        headers["Cookie"] = cookie
+    return headers
+
+
+def fetch(
+    url: str, timeout: float = 15.0, retries: int = 3, cookie: str | None = None
+) -> tuple[int, str]:
     """URL을 가져와 (status, body) 반환. 실패하면 (0, 에러문자열)."""
     last = ""
     for attempt in range(retries):
-        req = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": USER_AGENT,
-                "Accept": "*/*",
-                "Accept-Language": "ko-KR,ko;q=0.9",
-                "Referer": "https://www.cgv.co.kr/",
-            },
-        )
+        req = urllib.request.Request(url, headers=build_headers(cookie))
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 raw = resp.read()
@@ -99,7 +112,12 @@ def fetch(url: str, timeout: float = 15.0, retries: int = 3) -> tuple[int, str]:
                         continue
                 return resp.status, raw.decode("utf-8", "replace")
         except urllib.error.HTTPError as exc:
-            return exc.code, f"HTTP {exc.code} {exc.reason}"
+            body = ""
+            try:
+                body = exc.read().decode("utf-8", "replace")[:200]
+            except Exception:
+                pass
+            return exc.code, f"HTTP {exc.code} {exc.reason} {body}"
         except Exception as exc:  # 네트워크 계열은 재시도할 가치가 있다
             last = f"{type(exc).__name__}: {exc}"
             if attempt < retries - 1:
@@ -111,40 +129,94 @@ def fetch(url: str, timeout: float = 15.0, retries: int = 3) -> tuple[int, str]:
 # 탐지
 # --------------------------------------------------------------------------
 
-def to_text(body: str) -> str:
-    """HTML이든 JSON이든 하나의 평문으로 눌러서 문자열 검색이 가능하게 만든다.
+def squash(s: str) -> str:
+    """비교용 정규화: 공백 제거 + 소문자."""
+    return re.sub(r"\s+", "", s).lower()
 
-    DOM 선택자 대신 평문을 쓰는 이유: 마크업이 개편돼도 '오디세이'와 'IMAX'
-    라는 글자는 남기 때문에, 개편에 훨씬 덜 부서진다.
-    """
+
+def to_text(body: str) -> str:
+    """HTML이든 JSON이든 하나의 평문으로 눌러서 문자열 검색이 가능하게 만든다."""
     text = SCRIPT_RE.sub(" ", body)
     text = TAG_RE.sub(" ", text)
     text = html.unescape(text)
     return WS_RE.sub(" ", text).strip()
 
 
-def squash(s: str) -> str:
-    """비교용 정규화: 공백 제거 + 소문자."""
-    return re.sub(r"\s+", "", s).lower()
+def parse_json(body: str):
+    """JSON이면 파싱해서 돌려주고, 아니면 None."""
+    stripped = body.lstrip()
+    if not stripped.startswith(("{", "[")):
+        return None
+    try:
+        return json.loads(stripped)
+    except ValueError:
+        return None
 
 
-def find_matches(body: str, title: str, screen: str, window: int = 400) -> list[str]:
-    """제목이 등장하는 구간 주변에 상영관 표기(IMAX)가 같이 있는지 본다.
+def _scalars(node) -> str:
+    """dict/list의 '직속' 스칼라 값만 이어붙인다 (자식 컨테이너는 제외)."""
+    values = node.values() if isinstance(node, dict) else node
+    return " ".join(str(v) for v in values if isinstance(v, (str, int, float)))
+
+
+def _collect_times(node, out: set) -> None:
+    """하위 트리에서 상영 시각처럼 보이는 값을 긁어모은다."""
+    if isinstance(node, dict):
+        children = node.values()
+    elif isinstance(node, list):
+        children = node
+    else:
+        text = str(node)
+        if HHMM_RE.match(text):
+            out.add(f"{text[:2]}:{text[2:]}")
+        else:
+            for m in TIME_RE.finditer(text):
+                out.add(m.group(0))
+        return
+    for child in children:
+        _collect_times(child, out)
+
+
+def find_matches_json(data, title: str, screen: str) -> list[str]:
+    """JSON을 구조적으로 훑는다.
+
+    어떤 객체의 '조상 체인 + 자기 자신'의 스칼라 값들 안에 제목과 상영관
+    종류가 함께 있으면 매치로 본다. 필드 이름을 몰라도 되고, 영화가 상영관
+    아래에 있든 그 반대든 상관없이 잡힌다.
+    """
+    needle, screen_needle = squash(title), squash(screen)
+    hits: list[str] = []
+    seen: set[int] = set()
+
+    def walk(node, ancestor_ctx: str) -> None:
+        if not isinstance(node, (dict, list)):
+            return
+        ctx = ancestor_ctx + " " + squash(_scalars(node))
+        if needle in ctx and screen_needle in ctx and id(node) not in seen:
+            seen.add(id(node))
+            times: set[str] = set()
+            _collect_times(node, times)
+            hits.append(", ".join(sorted(times)[:12]) if times else "시간 미확인")
+            return  # 자식까지 중복해서 담지 않는다
+        children = node.values() if isinstance(node, dict) else node
+        for child in children:
+            walk(child, ctx)
+
+    walk(data, "")
+    return hits
+
+
+def find_matches_text(body: str, title: str, screen: str, window: int = 400) -> list[str]:
+    """HTML용. 제목이 등장하는 구간 주변에 상영관 표기가 같이 있는지 본다.
 
     페이지 어딘가에 IMAX 배너가 있다고 해서 그 영화의 IMAX 회차가 열린 건
     아니므로, 제목 근처(window 글자)로 범위를 좁혀서 판단한다.
-    반환값은 매치된 구간의 요약(상영 시각 등) 목록.
     """
     text = to_text(body)
     flat = squash(text)
-    # squash 된 인덱스를 원문으로 되돌리기 위한 매핑
-    index_map: list[int] = []
-    for i, ch in enumerate(text):
-        if not ch.isspace():
-            index_map.append(i)
+    index_map = [i for i, ch in enumerate(text) if not ch.isspace()]
 
-    needle = squash(title)
-    screen_needle = squash(screen)
+    needle, screen_needle = squash(title), squash(screen)
     if not needle:
         return []
 
@@ -152,22 +224,34 @@ def find_matches(body: str, title: str, screen: str, window: int = 400) -> list[
     start = 0
     while True:
         pos = flat.find(needle, start)
-        if pos < 0:
+        if pos < 0 or pos >= len(index_map):
             break
         start = pos + len(needle)
-        if pos >= len(index_map):
-            break
         origin = index_map[pos]
         chunk = text[max(0, origin - window // 2): origin + window]
         if screen_needle and screen_needle not in squash(chunk):
             continue
         times = sorted({m.group(0) for m in TIME_RE.finditer(chunk)})
-        seats = SEAT_RE.search(chunk)
         summary = ", ".join(times[:12]) if times else chunk[:120]
+        seats = SEAT_RE.search(chunk)
         if seats:
             summary += f"  (잔여석 표기 {seats.group(0)})"
         hits.append(summary)
     return hits
+
+
+def find_matches(body: str, title: str, screen: str, window: int = 400) -> list[str]:
+    """JSON이면 구조적으로, 아니면 평문 근접 검색으로 판단한다."""
+    data = parse_json(body)
+    if data is not None:
+        hits = find_matches_json(data, title, screen)
+        if hits:
+            return hits
+        # 구조가 예상과 다를 수 있으니 평문으로 한 번 더 (\uXXXX 해제 후)
+        return find_matches_text(
+            json.dumps(data, ensure_ascii=False), title, screen, window
+        )
+    return find_matches_text(body, title, screen, window)
 
 
 # --------------------------------------------------------------------------
@@ -177,7 +261,9 @@ def find_matches(body: str, title: str, screen: str, window: int = 400) -> list[
 def load_state(path: str) -> dict:
     try:
         with open(path, encoding="utf-8") as fh:
-            return json.load(fh)
+            state = json.load(fh)
+            state.setdefault("seen", {})
+            return state
     except (OSError, ValueError):
         return {"seen": {}}
 
@@ -195,9 +281,8 @@ def save_state(path: str, state: dict) -> None:
 # --------------------------------------------------------------------------
 
 def notify(subject: str, body: str, quiet: bool = False) -> None:
-    """콘솔 + (환경변수가 있으면) 텔레그램 / 웹훅 / macOS 알림센터."""
-    line = f"\n{'=' * 60}\n{subject}\n{body}\n{'=' * 60}"
-    print(line, flush=True)
+    """콘솔 + (환경변수가 있으면) 텔레그램 / 웹훅 + macOS 알림센터."""
+    print(f"\n{'=' * 60}\n{subject}\n{body}\n{'=' * 60}", flush=True)
     if not quiet:
         sys.stdout.write("\a\a\a")  # 터미널 벨
         sys.stdout.flush()
@@ -206,7 +291,7 @@ def notify(subject: str, body: str, quiet: bool = False) -> None:
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if token and chat_id:
         payload = urllib.parse.urlencode(
-            {"chat_id": chat_id, "text": f"{subject}\n{body}", "disable_web_page_preview": "false"}
+            {"chat_id": chat_id, "text": f"{subject}\n{body}"}
         ).encode()
         try:
             urllib.request.urlopen(
@@ -251,13 +336,35 @@ def notify(subject: str, body: str, quiet: bool = False) -> None:
 
 
 # --------------------------------------------------------------------------
-# 확인 루프
+# 조회
 # --------------------------------------------------------------------------
+
+def endpoints_for(args) -> list[str]:
+    if args.endpoint:
+        return [args.endpoint]
+    primary = CGV_API.replace("{co}", args.co).replace("{scope}", args.scope)
+    return [primary] + LEGACY_ENDPOINTS
+
+
+def fetch_schedule(args, theater: str, datestr: str) -> tuple[str, str]:
+    """(본문, 사용한 URL). 실패하면 ("", 마지막으로 시도한 URL)."""
+    tried = ""
+    for template in endpoints_for(args):
+        url = template.format(theater=theater, date=datestr)
+        tried = url
+        status, payload = fetch(
+            url, timeout=args.timeout, retries=2, cookie=args.cookie
+        )
+        if status == 200 and len(payload) > 100:
+            return payload, url
+        if args.verbose:
+            print(f"      [{status or 'ERR'}] {url}", file=sys.stderr)
+    return "", tried
+
 
 def check_once(args, state: dict) -> list[str]:
     """전 극장 × 전 날짜를 한 바퀴 돌고, 새로 발견한 항목의 알림 문구를 반환."""
     today = dt.date.today()
-    endpoints = [args.endpoint] if args.endpoint else CANDIDATE_ENDPOINTS
     fresh: list[str] = []
 
     for theater in args.theaters:
@@ -265,14 +372,7 @@ def check_once(args, state: dict) -> list[str]:
         for offset in range(args.days):
             date = today + dt.timedelta(days=offset)
             datestr = date.strftime("%Y%m%d")
-            body = ""
-            used = ""
-            for template in endpoints:
-                url = template.format(theater=theater, date=datestr)
-                status, payload = fetch(url, timeout=args.timeout)
-                if status == 200 and len(payload) > 200:
-                    body, used = payload, url
-                    break
+            body, used = fetch_schedule(args, theater, datestr)
             if not body:
                 if args.verbose:
                     print(f"[skip] {name} {datestr}: 응답 없음", file=sys.stderr)
@@ -286,11 +386,10 @@ def check_once(args, state: dict) -> list[str]:
                         "found_at": dt.datetime.now().isoformat(timespec="seconds"),
                         "times": hits,
                     }
-                    booking = BOOKING_URLS.get(theater, BOOKING_FALLBACK)
                     fresh.append(
                         f"{name} · {date:%Y-%m-%d (%a)}\n"
                         f"  회차: {' / '.join(hits[:3])}\n"
-                        f"  예매: {booking}"
+                        f"  예매: {BOOKING_URL}"
                     )
                 elif args.verbose:
                     print(f"[ok] {name} {datestr}: 이미 알림 완료", file=sys.stderr)
@@ -302,45 +401,93 @@ def check_once(args, state: dict) -> list[str]:
     return fresh
 
 
+# --------------------------------------------------------------------------
+# 진단 모드
+# --------------------------------------------------------------------------
+
 def run_probe(args) -> int:
-    """어떤 후보 엔드포인트가 실제로 시간표를 주는지 진단한다."""
+    """어떤 엔드포인트가 실제로 시간표를 주는지 진단한다."""
     today = dt.date.today().strftime("%Y%m%d")
     theater = args.theaters[0]
     print(f"진단 대상: {THEATERS.get(theater, theater)} ({theater}), 날짜 {today}\n")
     ok_any = False
-    for template in CANDIDATE_ENDPOINTS:
+    for template in endpoints_for(args):
         url = template.format(theater=theater, date=today)
-        status, body = fetch(url, timeout=args.timeout, retries=1)
+        status, body = fetch(url, timeout=args.timeout, retries=1, cookie=args.cookie)
         verdict = []
         if status != 200:
-            verdict.append("응답 실패")
+            verdict.append(f"응답 실패 — {body[:90]}")
         else:
-            text = to_text(body)
-            if len(body) < 500:
-                verdict.append("본문이 너무 짧음(빈 껍데기 의심)")
-            if TIME_RE.search(text):
-                verdict.append("상영 시각 패턴 있음")
-                ok_any = True
+            data = parse_json(body)
+            if data is not None:
+                verdict.append("JSON 파싱 성공")
+                times: set[str] = set()
+                _collect_times(data, times)
+                if times:
+                    verdict.append(f"상영 시각 {len(times)}개 발견")
+                    ok_any = True
+                else:
+                    verdict.append("상영 시각 없음(휴관일이거나 구조가 다름)")
+                if "imax" in squash(json.dumps(data, ensure_ascii=False)):
+                    verdict.append("IMAX 문자열 있음")
             else:
-                verdict.append("상영 시각 패턴 없음")
-            if "imax" in squash(text):
-                verdict.append("IMAX 문자열 있음")
-            if squash("자바스크립트") in squash(text) or "__NEXT_DATA__" in body:
-                verdict.append("JS 렌더링 페이지로 보임")
+                text = to_text(body)
+                if TIME_RE.search(text):
+                    verdict.append("상영 시각 패턴 있음")
+                    ok_any = True
+                else:
+                    verdict.append("상영 시각 패턴 없음")
+                if "__NEXT_DATA__" in body or "<html" in body[:200].lower():
+                    verdict.append("HTML 페이지로 보임")
         print(f"  [{status or 'ERR'}] {url}")
         print(f"        {len(body):>8,} bytes · {', '.join(verdict)}")
-        if status == 200 and args.verbose:
-            print(f"        미리보기: {to_text(body)[:200]}")
     print()
     if ok_any:
-        print("→ '상영 시각 패턴 있음'이 뜬 URL을 --endpoint 로 고정해 쓰면 가장 안정적입니다.")
+        print("→ 정상입니다. 그대로 감시를 시작하면 됩니다: python3 cgv_imax_watch.py -v")
         return 0
     print(
-        "→ 살아있는 엔드포인트가 없습니다. 브라우저에서 CGV 예매 페이지를 열고\n"
-        "  개발자도구 Network 탭에서 시간표를 담아오는 요청 URL을 찾아\n"
-        "  --endpoint 'https://.../{theater}/{date}' 형태로 넘겨주세요."
+        "→ 쓸 만한 응답이 없습니다.\n"
+        "  403/503이면 --cookie 로 브라우저 쿠키를 넘겨보세요.\n"
+        "  그래도 안 되면 개발자도구에서 URL을 다시 확인해 --endpoint 로 넘기세요."
     )
     return 1
+
+
+def run_dump(args) -> int:
+    """응답 원문을 파일로 저장한다. 구조를 눈으로 확인할 때 쓴다."""
+    theater = args.theaters[0]
+    datestr = (dt.date.today() + dt.timedelta(days=args.dump_offset)).strftime("%Y%m%d")
+    body, used = fetch_schedule(args, theater, datestr)
+    if not body:
+        print(f"응답을 받지 못했습니다 (마지막 시도: {used})", file=sys.stderr)
+        return 1
+    data = parse_json(body)
+    with open(args.dump, "w", encoding="utf-8") as fh:
+        if data is not None:
+            json.dump(data, fh, ensure_ascii=False, indent=2)
+        else:
+            fh.write(body)
+    print(f"{used}\n→ {args.dump} 에 {len(body):,} bytes 저장했습니다.")
+    if data is not None:
+        titles = set()
+
+        def walk(node):
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    if isinstance(value, str) and re.search(r"(?i)nm$|name", key):
+                        titles.add(value)
+                    walk(value)
+            elif isinstance(node, list):
+                for child in node:
+                    walk(child)
+
+        walk(data)
+        preview = sorted(t for t in titles if t.strip())[:25]
+        if preview:
+            print("\n응답에 들어있는 이름들 (일부):")
+            for item in preview:
+                print(f"  · {item}")
+    return 0
 
 
 def run_selftest() -> int:
@@ -364,34 +511,81 @@ def run_selftest() -> int:
       <div class="info-movie"><strong>오디세이</strong></div>
       <div class="time"><a>15:00</a></div></div>
     """
-    json_payload = json.dumps(
-        {"screens": [{"screenType": "IMAX", "movieNm": "오디세이", "startTime": "20:10"}]},
+    # 실제 API 형태에 가까운 중첩 JSON: 영화 아래에 상영관, 그 아래에 회차
+    api_open = json.dumps(
+        {
+            "code": "200",
+            "data": {
+                "movieList": [
+                    {
+                        "movNm": "오디세이",
+                        "scnList": [
+                            {
+                                "scnsNm": "IMAX관",
+                                "timeList": [
+                                    {"scnSchdlStrTm": "1930", "restSeatCnt": 120},
+                                    {"scnSchdlStrTm": "2240", "restSeatCnt": 301},
+                                ],
+                            }
+                        ],
+                    },
+                    {"movNm": "다른영화", "scnList": [{"scnsNm": "2관"}]},
+                ]
+            },
+        },
         ensure_ascii=False,
     )
+    # 아직 안 열린 날: 다른 영화만 IMAX에 걸려 있다
+    api_closed = json.dumps(
+        {
+            "data": {
+                "movieList": [
+                    {
+                        "movNm": "다른영화",
+                        "scnList": [{"scnsNm": "IMAX관", "timeList": [{"scnSchdlStrTm": "1000"}]}],
+                    }
+                ]
+            }
+        },
+        ensure_ascii=False,
+    )
+    api_escaped = json.dumps({"data": [{"nm": "오디세이", "screen": "IMAX", "t": "2010"}]})
 
     cases = [
         ("IMAX 회차 열림(HTML)", open_html, True),
-        ("다른 영화만 있음", closed_html, False),
+        ("다른 영화만 있음(HTML)", closed_html, False),
         ("멀리 있는 IMAX 배너에 낚이지 않음", decoy_html, False),
-        ("JSON 응답", json_payload, True),
+        ("API JSON — 열림", api_open, True),
+        ("API JSON — 아직 안 열림", api_closed, False),
+        ("API JSON — 한글이 \\uXXXX 로 이스케이프된 경우", api_escaped, True),
     ]
     failed = 0
     for label, payload, expected in cases:
         got = bool(find_matches(payload, "오디세이", "IMAX"))
         mark = "PASS" if got == expected else "FAIL"
-        if got != expected:
-            failed += 1
+        failed += got != expected
         print(f"  [{mark}] {label} (기대 {expected}, 실제 {got})")
-    # 공백/대소문자 변형도 잡아야 한다
-    variant = '<div>i m a x</div><div>오디 세이</div>'
-    if not find_matches(variant, "오디세이", "IMAX", window=200):
+
+    if find_matches('<div>i m a x</div><div>오디 세이</div>', "오디세이", "IMAX", 200):
+        print("  [PASS] 공백 변형 매칭")
+    else:
         print("  [FAIL] 공백 변형 매칭")
         failed += 1
+
+    times = find_matches(api_open, "오디세이", "IMAX")
+    if times and "19:30" in times[0] and "22:40" in times[0]:
+        print("  [PASS] API 시각 표기(1930 → 19:30) 변환")
     else:
-        print("  [PASS] 공백 변형 매칭")
+        print(f"  [FAIL] API 시각 표기 변환 — {times}")
+        failed += 1
+
     print("\n셀프테스트: " + ("전부 통과" if not failed else f"{failed}건 실패"))
     return 1 if failed else 0
 
+
+# --------------------------------------------------------------------------
+# 진입점
+# --------------------------------------------------------------------------
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
@@ -404,13 +598,20 @@ def parse_args(argv=None):
     p.add_argument(
         "--theaters",
         default="0013,0059",
-        help="극장 코드 쉼표 구분 (기본: 0013 용산, 0059 영등포)",
+        help="극장 코드(siteNo) 쉼표 구분 (기본: 0013 용산, 0059 영등포)",
     )
     p.add_argument("--days", type=int, default=30, help="오늘부터 며칠치를 볼지 (기본 30)")
     p.add_argument("--interval", type=int, default=300, help="확인 주기(초, 기본 300)")
     p.add_argument("--gap", type=float, default=0.4, help="요청 사이 간격(초, 기본 0.4)")
     p.add_argument("--timeout", type=float, default=15.0, help="요청 타임아웃(초)")
+    p.add_argument("--co", default="A420", help="CGV API coCd (기본 A420)")
+    p.add_argument("--scope", default="08", help="CGV API rtctlScopCd (기본 08)")
     p.add_argument("--endpoint", help="시간표 URL 템플릿. {theater}, {date} 사용")
+    p.add_argument(
+        "--cookie",
+        default=os.environ.get("CGV_COOKIE"),
+        help="브라우저 쿠키 문자열 (403이 날 때만 필요). 환경변수 CGV_COOKIE 로도 가능",
+    )
     p.add_argument(
         "--state",
         default=os.path.expanduser("~/.cgv_imax_watch.json"),
@@ -419,6 +620,8 @@ def parse_args(argv=None):
     p.add_argument("--once", action="store_true", help="한 번만 확인하고 종료 (cron 용)")
     p.add_argument("--probe", action="store_true", help="엔드포인트 생존 진단")
     p.add_argument("--selftest", action="store_true", help="네트워크 없이 탐지 로직 검증")
+    p.add_argument("--dump", metavar="FILE", help="응답 원문을 파일로 저장하고 종료")
+    p.add_argument("--dump-offset", type=int, default=0, help="--dump 할 날짜 (오늘+N일)")
     p.add_argument("--quiet", action="store_true", help="터미널 벨 끄기")
     p.add_argument("--verbose", "-v", action="store_true", help="확인 과정 출력")
     args = p.parse_args(argv)
@@ -434,6 +637,8 @@ def main(argv=None) -> int:
         return run_selftest()
     if args.probe:
         return run_probe(args)
+    if args.dump:
+        return run_dump(args)
 
     state = load_state(args.state)
     label = f"{args.title} {args.screen}"

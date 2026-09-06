@@ -19,27 +19,51 @@ python3 cgv_imax_watch.py -v           # 상주하며 5분마다 확인
 
 파이썬 3.9+ 표준 라이브러리만 씁니다. `pip install` 필요 없습니다.
 
-## ⚠️ 먼저 `--probe` 를 돌려야 하는 이유
+## 어디서 데이터를 가져오나
 
-CGV가 홈페이지를 개편해 `cgv.co.kr/cnm/...` 구조로 옮겨갔습니다. 스크립트에
-들어 있는 후보 URL(구 `iframeTheater.aspx` 등)이 아직 살아있는지는 **직접
-확인해야** 합니다. `--probe` 가 "상영 시각 패턴 있음"을 출력하면 그 URL을
-그대로 쓰면 됩니다.
+개편된 CGV 사이트가 실제로 쓰는 시간표 API를 그대로 씁니다 (브라우저
+개발자도구에서 확인):
 
-전부 실패하면 직접 찾아서 넘기세요:
-
-1. 브라우저에서 CGV 극장별 예매 페이지를 엽니다.
-2. 개발자도구 → Network → Fetch/XHR, 날짜를 한 번 바꿔봅니다.
-3. 시간표 데이터가 실린 요청의 URL을 복사합니다.
-4. 극장코드 자리를 `{theater}`, 날짜 자리를 `{date}` (YYYYMMDD)로 바꿔 넘깁니다.
-
-```bash
-python3 cgv_imax_watch.py --endpoint 'https://cgv.co.kr/.../{theater}/{date}' -v
+```
+GET https://cgv.co.kr/api/v1/booking/searchMovScnInfo
+      ?coCd=A420&siteNo={극장코드}&scnYmd={YYYYMMDD}&rtctlScopCd=08
 ```
 
-탐지는 DOM 선택자가 아니라 **평문 검색**으로 합니다(제목 등장 위치 ±400자
-안에 `IMAX`가 있는지). 마크업이 바뀌어도 잘 버티고, 페이지 구석의 IMAX
-배너에는 낚이지 않습니다 — `--selftest` 의 세 번째 케이스가 그걸 검증합니다.
+JSON으로 응답합니다. 이게 막히면 구 `iframeTheater.aspx` 계열 주소로
+자동 폴백합니다. `--probe` 로 지금 어느 쪽이 살아있는지 확인할 수 있습니다.
+
+```
+  [200] https://cgv.co.kr/api/v1/booking/searchMovScnInfo?...
+           38,204 bytes · JSON 파싱 성공, 상영 시각 62개 발견, IMAX 문자열 있음
+```
+
+**403 / 503이 뜨면** Cloudflare 앞단에 걸린 겁니다. 브라우저 개발자도구에서
+요청을 우클릭 → Copy as cURL 해서 `-b` 뒤에 붙어 있는 쿠키 문자열을 넘기세요:
+
+```bash
+export CGV_COOKIE='__cf_bm=...; _cfuvid=...'
+python3 cgv_imax_watch.py --probe
+```
+
+쿠키는 30분 남짓이면 만료되므로 상시 감시에는 부적합합니다. 쿠키 없이도
+되는 게 정상이고, 계속 403이 난다면 확인 주기를 늘리세요.
+
+API 구조가 바뀌어 탐지가 안 되는 것 같으면 응답 원문을 떠서 보면 됩니다:
+
+```bash
+python3 cgv_imax_watch.py --dump today.json --dump-offset 7
+```
+
+## 탐지 방식
+
+JSON은 **구조적으로** 훑습니다. 어떤 객체의 조상 체인과 자기 자신의 값
+안에 제목과 `IMAX`가 함께 있으면 매치로 봅니다. 필드 이름을 몰라도 되고,
+영화 아래에 상영관이 있든 그 반대든 상관없이 잡힙니다. 그래서 "IMAX관에
+다른 영화만 걸려 있는 날"을 오탐하지 않습니다 — `--selftest` 의
+`API JSON — 아직 안 열림` 케이스가 그걸 검증합니다.
+
+HTML로 폴백했을 때는 평문 근접 검색(제목 등장 위치 ±400자 안에 `IMAX`)을
+씁니다. DOM 선택자를 쓰지 않으므로 마크업 개편에 잘 버팁니다.
 
 ## 알림 받기
 
@@ -68,6 +92,8 @@ export WEBHOOK_URL=https://discord.com/api/webhooks/...
 | `--days` | `30` | 오늘부터 며칠치를 훑을지 |
 | `--interval` | `300` | 확인 주기(초). 최소 30초로 강제됩니다 |
 | `--endpoint` | — | 시간표 URL 템플릿 (`{theater}`, `{date}`) |
+| `--cookie` | `$CGV_COOKIE` | 403이 날 때 넘길 브라우저 쿠키 |
+| `--dump` | — | 응답 원문을 파일로 저장하고 종료 |
 | `--once` | — | 한 번만 확인하고 종료 (cron 용) |
 | `--state` | `~/.cgv_imax_watch.json` | 이미 알린 항목 기록 |
 
@@ -119,3 +145,7 @@ launchctl load ~/Library/LaunchAgents/com.local.cgv-imax-watch.plist
   30초 주기로 돌려도 사람이 수동으로 새로고침하는 것보다 훨씬 빠릅니다.
 - 서버에 부담이 가지 않도록 요청 간 간격(`--gap`)과 최소 확인 주기(30초)를
   두었습니다. 이보다 짧게 때리지 마세요.
+- CGV는 예매가 몰리는 시간에 NetFunnel(가상 대기열)을 앞단에 세웁니다.
+  대기열이 걸리면 API가 평소와 다른 응답을 줄 수 있는데, 그건 이미
+  오픈됐다는 신호이기도 합니다. 알림을 받으면 브라우저로 바로 넘어가세요.
+- 쿠키를 쓰게 되더라도 파일에 적어 커밋하지 마세요. 이 저장소는 공개입니다.
