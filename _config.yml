@@ -170,6 +170,7 @@ exclude:
   - Rakefile
   - README
   - tmp
+  - /autotrade # 자동매매 프로그램 (Jekyll 빌드 대상 아님)
   - /docs # ignore Minimal Mistakes /docs
   - /test # ignore Minimal Mistakes /test
 keep_files:

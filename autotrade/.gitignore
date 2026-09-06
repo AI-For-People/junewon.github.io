@@ -1,0 +1,21 @@
+# 비밀값 — 절대 커밋 금지
+.env
+.env.*
+!.env.example
+config/*.spec.json
+!config/*.spec.example.json
+
+# 런타임 산출물 (감사 로그·토큰·킬스위치)
+var/
+*.jsonl
+
+# 시세 데이터 (재배포 금지 대상이 많다)
+data/*.csv
+!data/sample_synthetic_daily.csv
+
+# 파이썬
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/

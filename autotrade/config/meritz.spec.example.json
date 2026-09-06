@@ -1,0 +1,103 @@
+{
+  "_readme": [
+    "메리츠증권 오픈 API가 공개되면 이 파일을 config/meritz.spec.json 으로 복사하고",
+    "TODO_ 로 시작하는 값을 공식 문서 기준으로 채우십시오.",
+    "치환 변수: ${APP_KEY} ${APP_SECRET} ${TOKEN} ${ACCOUNT_NO} ${ACCOUNT_PD}",
+    "          ${SYMBOL} ${QTY} ${PRICE} ${SIDE} ${ORDER_TYPE} ${CLIENT_ORDER_ID}",
+    "          ${DATE_FROM} ${DATE_TO} ${COUNT}",
+    "채우지 않은 TODO 가 남아 있으면 어댑터가 기동을 거부합니다(안전장치)."
+  ],
+  "name": "meritz",
+  "base_url": "TODO_https://openapi.meritz.co.kr",
+  "rate_limit_per_sec": 2,
+  "success_check": {
+    "field": "TODO_rt_cd",
+    "equals": "0",
+    "message_field": "TODO_msg1"
+  },
+  "auth": {
+    "type": "oauth2_client_credentials",
+    "path": "TODO_/oauth2/token",
+    "method": "POST",
+    "headers": { "content-type": "application/json" },
+    "body": {
+      "grant_type": "client_credentials",
+      "appkey": "${APP_KEY}",
+      "appsecret": "${APP_SECRET}"
+    },
+    "token_field": "access_token",
+    "expires_field": "expires_in",
+    "header_template": {
+      "content-type": "application/json; charset=utf-8",
+      "authorization": "Bearer ${TOKEN}",
+      "appkey": "${APP_KEY}",
+      "appsecret": "${APP_SECRET}"
+    }
+  },
+  "endpoints": {
+    "quote": {
+      "path": "TODO_/uapi/domestic-stock/v1/quotations/inquire-price",
+      "method": "GET",
+      "params": { "TODO_symbol_param": "${SYMBOL}" },
+      "response": {
+        "price": "TODO_output.current_price",
+        "bid": "TODO_output.bid_price",
+        "ask": "TODO_output.ask_price"
+      }
+    },
+    "candles": {
+      "path": "TODO_/uapi/domestic-stock/v1/quotations/daily-price",
+      "method": "GET",
+      "params": {
+        "TODO_symbol_param": "${SYMBOL}",
+        "TODO_from_param": "${DATE_FROM}",
+        "TODO_to_param": "${DATE_TO}"
+      },
+      "response": {
+        "list": "TODO_output",
+        "date": "TODO_date",
+        "date_format": "%Y%m%d",
+        "open": "TODO_open",
+        "high": "TODO_high",
+        "low": "TODO_low",
+        "close": "TODO_close",
+        "volume": "TODO_volume"
+      }
+    },
+    "balance": {
+      "path": "TODO_/uapi/domestic-stock/v1/trading/inquire-balance",
+      "method": "GET",
+      "params": { "TODO_account_param": "${ACCOUNT_NO}" },
+      "response": {
+        "cash": "TODO_output2[0].orderable_cash",
+        "positions": "TODO_output1",
+        "position_symbol": "TODO_symbol",
+        "position_qty": "TODO_quantity",
+        "position_avg_price": "TODO_avg_price"
+      }
+    },
+    "order": {
+      "path": "TODO_/uapi/domestic-stock/v1/trading/order-cash",
+      "method": "POST",
+      "codes": {
+        "buy": "TODO_02",
+        "sell": "TODO_01",
+        "limit": "TODO_00",
+        "market": "TODO_01"
+      },
+      "body": {
+        "TODO_account": "${ACCOUNT_NO}",
+        "TODO_product": "${ACCOUNT_PD}",
+        "TODO_symbol": "${SYMBOL}",
+        "TODO_side": "${SIDE}",
+        "TODO_order_type": "${ORDER_TYPE}",
+        "TODO_qty": "${QTY}",
+        "TODO_price": "${PRICE}"
+      },
+      "response": {
+        "order_id": "TODO_output.order_no",
+        "message": "TODO_msg1"
+      }
+    }
+  }
+}

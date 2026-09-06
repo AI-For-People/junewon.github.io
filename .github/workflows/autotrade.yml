@@ -1,0 +1,53 @@
+name: autotrade
+
+on:
+  push:
+    paths:
+      - 'autotrade/**'
+      - '.github/workflows/autotrade.yml'
+  pull_request:
+    paths:
+      - 'autotrade/**'
+      - '.github/workflows/autotrade.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: autotrade
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run tests
+        run: python -m pytest
+      - name: Environment self-check (offline)
+        run: python -m autotrade.cli doctor
+      - name: Backtest smoke test
+        run: python -m autotrade.cli backtest
+      - name: Engine rehearsal smoke test
+        run: python -m autotrade.cli simulate --cycles 50 --warmup 25
+
+  secrets-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 비밀 파일이 커밋되지 않았는지 확인
+        run: |
+          set -e
+          if git ls-files --error-unmatch autotrade/.env 2>/dev/null; then
+            echo "::error::autotrade/.env 가 커밋되어 있습니다. 즉시 제거하고 앱키를 재발급하십시오."
+            exit 1
+          fi
+          if git ls-files 'autotrade/config/*.spec.json' | grep -v example | grep . ; then
+            echo "::error::채워진 브로커 스펙 파일이 커밋되어 있습니다."
+            exit 1
+          fi
+          echo "OK — 비밀 파일 없음"
