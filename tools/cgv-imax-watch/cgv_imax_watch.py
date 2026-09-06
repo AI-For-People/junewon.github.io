@@ -180,14 +180,15 @@ def _collect_times(node, out: set) -> None:
         _collect_times(child, out)
 
 
-def find_matches_json(data, title: str, screen: str) -> list[str]:
+def find_matches_json(data, titles: list[str], screen: str) -> list[str]:
     """JSON을 구조적으로 훑는다.
 
     어떤 객체의 '조상 체인 + 자기 자신'의 스칼라 값들 안에 제목과 상영관
     종류가 함께 있으면 매치로 본다. 필드 이름을 몰라도 되고, 영화가 상영관
     아래에 있든 그 반대든 상관없이 잡힌다.
     """
-    needle, screen_needle = squash(title), squash(screen)
+    needles = [squash(t) for t in titles if t.strip()]
+    screen_needle = squash(screen)
     hits: list[str] = []
     seen: set[int] = set()
 
@@ -195,7 +196,8 @@ def find_matches_json(data, title: str, screen: str) -> list[str]:
         if not isinstance(node, (dict, list)):
             return
         ctx = ancestor_ctx + " " + squash(_scalars(node))
-        if needle in ctx and screen_needle in ctx and id(node) not in seen:
+        matched = any(n in ctx for n in needles)
+        if matched and screen_needle in ctx and id(node) not in seen:
             seen.add(id(node))
             times: set[str] = set()
             _collect_times(node, times)
@@ -209,7 +211,7 @@ def find_matches_json(data, title: str, screen: str) -> list[str]:
     return hits
 
 
-def find_matches_text(body: str, title: str, screen: str, window: int = 400) -> list[str]:
+def find_matches_text(body: str, titles: list[str], screen: str, window: int = 400) -> list[str]:
     """HTML용. 제목이 등장하는 구간 주변에 상영관 표기가 같이 있는지 본다.
 
     페이지 어딘가에 IMAX 배너가 있다고 해서 그 영화의 IMAX 회차가 열린 건
@@ -219,42 +221,50 @@ def find_matches_text(body: str, title: str, screen: str, window: int = 400) -> 
     flat = squash(text)
     index_map = [i for i, ch in enumerate(text) if not ch.isspace()]
 
-    needle, screen_needle = squash(title), squash(screen)
-    if not needle:
-        return []
-
+    screen_needle = squash(screen)
     hits: list[str] = []
-    start = 0
-    while True:
-        pos = flat.find(needle, start)
-        if pos < 0 or pos >= len(index_map):
-            break
-        start = pos + len(needle)
-        origin = index_map[pos]
-        chunk = text[max(0, origin - window // 2): origin + window]
-        if screen_needle and screen_needle not in squash(chunk):
+    for title in titles:
+        needle = squash(title)
+        if not needle:
             continue
-        times = sorted({m.group(0) for m in TIME_RE.finditer(chunk)})
-        summary = ", ".join(times[:12]) if times else chunk[:120]
-        seats = SEAT_RE.search(chunk)
-        if seats:
-            summary += f"  (잔여석 표기 {seats.group(0)})"
-        hits.append(summary)
+        start = 0
+        while True:
+            pos = flat.find(needle, start)
+            if pos < 0 or pos >= len(index_map):
+                break
+            start = pos + len(needle)
+            origin = index_map[pos]
+            chunk = text[max(0, origin - window // 2): origin + window]
+            if screen_needle and screen_needle not in squash(chunk):
+                continue
+            times = sorted({m.group(0) for m in TIME_RE.finditer(chunk)})
+            summary = ", ".join(times[:12]) if times else chunk[:120]
+            seats = SEAT_RE.search(chunk)
+            if seats:
+                summary += f"  (잔여석 표기 {seats.group(0)})"
+            hits.append(summary)
     return hits
 
 
-def find_matches(body: str, title: str, screen: str, window: int = 400) -> list[str]:
-    """JSON이면 구조적으로, 아니면 평문 근접 검색으로 판단한다."""
+def find_matches(body: str, titles, screen: str, window: int = 400) -> list[str]:
+    """JSON이면 구조적으로, 아니면 평문 근접 검색으로 판단한다.
+
+    titles 는 같은 영화의 표기 후보 목록이다. CGV는 같은 작품을 한글로도
+    영어로도('오디세이' / 'The Odyssey') 담고, 상영관 표기를 제목 앞에
+    붙이기도 하므로('(IMAX LASER 2D)The Odyssey') 하나라도 걸리면 매치로 본다.
+    """
+    if isinstance(titles, str):
+        titles = [titles]
     data = parse_json(body)
     if data is not None:
-        hits = find_matches_json(data, title, screen)
+        hits = find_matches_json(data, titles, screen)
         if hits:
             return hits
         # 구조가 예상과 다를 수 있으니 평문으로 한 번 더 (\uXXXX 해제 후)
         return find_matches_text(
-            json.dumps(data, ensure_ascii=False), title, screen, window
+            json.dumps(data, ensure_ascii=False), titles, screen, window
         )
-    return find_matches_text(body, title, screen, window)
+    return find_matches_text(body, titles, screen, window)
 
 
 # --------------------------------------------------------------------------
@@ -394,7 +404,7 @@ def check_once(args, state: dict) -> list[str]:
                     print(f"[skip] {name} {datestr}: 응답 없음", file=sys.stderr)
                 continue
 
-            hits = find_matches(body, args.title, args.screen)
+            hits = find_matches(body, args.titles, args.screen)
             key = f"{theater}|{datestr}"
             if hits:
                 if not state["seen"].get(key):
@@ -487,24 +497,41 @@ def run_dump(args) -> int:
             fh.write(body)
     print(f"{used}\n→ {args.dump} 에 {len(body):,} bytes 저장했습니다.")
     if data is not None:
-        titles = set()
+        found: dict[str, set] = {}
 
         def walk(node):
             if isinstance(node, dict):
                 for key, value in node.items():
-                    if isinstance(value, str) and re.search(r"(?i)nm$|name", key):
-                        titles.add(value)
+                    if isinstance(value, str) and re.search(r"(?i)nm$|name|titl", key):
+                        text = value.strip()
+                        # 이미지 경로·코드값은 제목이 아니다
+                        if text and "/" not in text and not text.isdigit() and text != "-":
+                            found.setdefault(key, set()).add(text)
                     walk(value)
             elif isinstance(node, list):
                 for child in node:
                     walk(child)
 
         walk(data)
-        preview = sorted(t for t in titles if t.strip())[:25]
-        if preview:
-            print("\n응답에 들어있는 이름들 (일부):")
-            for item in preview:
-                print(f"  · {item}")
+        if found:
+            print("\n제목처럼 보이는 필드들:")
+            for key in sorted(found):
+                values = sorted(found[key])
+                print(f"  {key} ({len(values)}개)")
+                for item in values[:12]:
+                    print(f"    · {item}")
+                if len(values) > 12:
+                    print(f"    … 외 {len(values) - 12}개")
+
+    hits = find_matches(body, args.titles, args.screen)
+    target = " / ".join(args.titles)
+    if hits:
+        print(f"\n✅ 이 응답에서 '{target}' + {args.screen} 매치 {len(hits)}건:")
+        for hit in hits[:5]:
+            print(f"    · {hit}")
+    else:
+        print(f"\n❌ 이 응답에서는 '{target}' + {args.screen} 를 찾지 못했습니다.")
+        print("   위 목록에 해당 영화가 보이면 --title 로 그 표기를 그대로 넘겨주세요.")
     return 0
 
 
@@ -568,6 +595,11 @@ def run_selftest() -> int:
         ensure_ascii=False,
     )
     api_escaped = json.dumps({"data": [{"nm": "오디세이", "screen": "IMAX", "t": "2010"}]})
+    # 실제 응답에서 확인된 표기: 상영관이 제목 앞에 붙고 제목은 영어다
+    api_english = json.dumps(
+        {"data": {"list": [{"movNmEn": "(IMAX LASER 2D)The Odyssey", "tm": "1400"}]}},
+        ensure_ascii=False,
+    )
 
     cases = [
         ("IMAX 회차 열림(HTML)", open_html, True),
@@ -576,21 +608,22 @@ def run_selftest() -> int:
         ("API JSON — 열림", api_open, True),
         ("API JSON — 아직 안 열림", api_closed, False),
         ("API JSON — 한글이 \\uXXXX 로 이스케이프된 경우", api_escaped, True),
+        ("API JSON — 영어 제목 + 제목에 붙은 상영관 표기", api_english, True),
     ]
     failed = 0
     for label, payload, expected in cases:
-        got = bool(find_matches(payload, "오디세이", "IMAX"))
+        got = bool(find_matches(payload, ["오디세이", "The Odyssey"], "IMAX"))
         mark = "PASS" if got == expected else "FAIL"
         failed += got != expected
         print(f"  [{mark}] {label} (기대 {expected}, 실제 {got})")
 
-    if find_matches('<div>i m a x</div><div>오디 세이</div>', "오디세이", "IMAX", 200):
+    if find_matches('<div>i m a x</div><div>오디 세이</div>', ["오디세이"], "IMAX", 200):
         print("  [PASS] 공백 변형 매칭")
     else:
         print("  [FAIL] 공백 변형 매칭")
         failed += 1
 
-    times = find_matches(api_open, "오디세이", "IMAX")
+    times = find_matches(api_open, ["오디세이"], "IMAX")
     if times and "19:30" in times[0] and "22:40" in times[0]:
         print("  [PASS] API 시각 표기(1930 → 19:30) 변환")
     else:
@@ -611,7 +644,12 @@ def parse_args(argv=None):
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    p.add_argument("--title", default="오디세이", help="감시할 영화 제목 (기본: 오디세이)")
+    p.add_argument(
+        "--title",
+        default="오디세이,The Odyssey",
+        help="감시할 영화 제목. 쉼표로 표기 후보를 여러 개 줄 수 있다 "
+        "(기본: '오디세이,The Odyssey')",
+    )
     p.add_argument("--screen", default="IMAX", help="상영관 종류 (기본: IMAX)")
     p.add_argument(
         "--theaters",
@@ -644,6 +682,7 @@ def parse_args(argv=None):
     p.add_argument("--verbose", "-v", action="store_true", help="확인 과정 출력")
     args = p.parse_args(argv)
     args.theaters = [t.strip() for t in args.theaters.split(",") if t.strip()]
+    args.titles = [t.strip() for t in args.title.split(",") if t.strip()]
     args.interval = max(args.interval, MIN_INTERVAL_SEC)
     return args
 
@@ -659,7 +698,7 @@ def main(argv=None) -> int:
         return run_dump(args)
 
     state = load_state(args.state)
-    label = f"{args.title} {args.screen}"
+    label = f"{args.titles[0]} {args.screen}"
     targets = ", ".join(THEATERS.get(t, t) for t in args.theaters)
 
     while True:
