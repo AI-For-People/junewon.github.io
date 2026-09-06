@@ -1,0 +1,74 @@
+name: 환율 카드뉴스 테스트
+
+on:
+  pull_request:
+    paths:
+      - "tools/**"
+      - ".github/workflows/fx-newsletter*.yml"
+  push:
+    branches: [master]
+    paths:
+      - "tools/**"
+      - ".github/workflows/fx-newsletter*.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fx-newsletter-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: tools
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: tools/fx_newsletter/requirements.txt
+
+      # 발송 워크플로와 같은 폰트 환경에서 렌더링을 검증한다.
+      - name: 한글 폰트 설치
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fonts-nanum
+          fc-cache -f
+
+      - name: 의존성 설치
+        run: pip install -r fx_newsletter/requirements.txt
+
+      - name: 테스트
+        run: python -m unittest discover -s fx_newsletter/tests -t . -v
+
+      # 실제 발송 경로를 뺀 나머지를 합성 데이터 없이 한 번 더 훑는다.
+      - name: 카드 렌더링 스모크 테스트
+        run: |
+          python - <<'PY'
+          import datetime as dt
+          from pathlib import Path
+          from fx_newsletter import cards, commentary, fetch, indicators
+          from fx_newsletter.tests.fixtures import synthetic_payload
+
+          end = dt.date(2026, 9, 4)
+          snapshots = indicators.build_snapshots(fetch.to_series(synthetic_payload(end)))
+          note = commentary.rule_based(snapshots)
+          paths = cards.render_all(snapshots, note, end, Path("build/smoke"))
+          print(f"카드 {len(paths)}장 생성 완료")
+          PY
+
+      - name: 스모크 결과 보관
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-cards-${{ github.run_number }}
+          path: tools/build/smoke
+          if-no-files-found: warn
+          retention-days: 7
