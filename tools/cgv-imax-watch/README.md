@@ -30,7 +30,12 @@ GET https://cgv.co.kr/api/v1/booking/searchMovScnInfo
 ```
 
 JSON으로 응답합니다. 이게 막히면 구 `iframeTheater.aspx` 계열 주소로
-자동 폴백합니다. `--probe` 로 지금 어느 쪽이 살아있는지 확인할 수 있습니다.
+자동 폴백하지만, 확인해 보니 그 주소들은 폐기된 뒤에도 200과 함께 시간표가
+없는 빈 HTML을 돌려줍니다. 그래서 응답을 받아들이기 전에 **시간표가 실제로
+담겨 있는지 검사**합니다 — 껍데기는 실패로 취급해서, 회차를 놓치고도
+"없음"으로 넘어가는 일이 없게 했습니다.
+
+`--probe` 로 지금 어느 쪽이 살아있는지 확인할 수 있습니다.
 
 ```
   [200] https://cgv.co.kr/api/v1/booking/searchMovScnInfo?...

@@ -64,6 +64,9 @@ USER_AGENT = (
 # 서버에 부담 주지 않도록 최소 간격을 둔다.
 MIN_INTERVAL_SEC = 30
 
+# 안내 문구에 쓸 실행 명령 (Windows는 python3 가 없다).
+PY_CMD = "python" if sys.platform == "win32" else "python3"
+
 TAG_RE = re.compile(r"<[^>]+>")
 SCRIPT_RE = re.compile(r"<(script|style)\b.*?</\1>", re.S | re.I)
 WS_RE = re.compile(r"\s+")
@@ -339,6 +342,18 @@ def notify(subject: str, body: str, quiet: bool = False) -> None:
 # 조회
 # --------------------------------------------------------------------------
 
+def looks_usable(body: str) -> bool:
+    """시간표가 실제로 담긴 응답인지 확인한다.
+
+    구 .aspx 주소들은 폐기됐는데도 200과 함께 새 사이트로 리다이렉트되는 빈
+    HTML 껍데기를 돌려준다. 그걸 정상 응답으로 받아들이면 "회차 없음"으로
+    조용히 넘어가 버리므로, 시간표의 흔적이 없는 본문은 실패로 취급한다.
+    """
+    if parse_json(body) is not None:
+        return True
+    return bool(TIME_RE.search(to_text(body)))
+
+
 def endpoints_for(args) -> list[str]:
     if args.endpoint:
         return [args.endpoint]
@@ -355,10 +370,11 @@ def fetch_schedule(args, theater: str, datestr: str) -> tuple[str, str]:
         status, payload = fetch(
             url, timeout=args.timeout, retries=2, cookie=args.cookie
         )
-        if status == 200 and len(payload) > 100:
+        if status == 200 and looks_usable(payload):
             return payload, url
         if args.verbose:
-            print(f"      [{status or 'ERR'}] {url}", file=sys.stderr)
+            reason = "시간표 없는 응답" if status == 200 else f"HTTP {status or 'ERR'}"
+            print(f"      [{reason}] {url}", file=sys.stderr)
     return "", tried
 
 
@@ -439,11 +455,13 @@ def run_probe(args) -> int:
                     verdict.append("상영 시각 패턴 없음")
                 if "__NEXT_DATA__" in body or "<html" in body[:200].lower():
                     verdict.append("HTML 페이지로 보임")
+        if status == 200 and not looks_usable(body):
+            verdict.append("→ 시간표 없는 껍데기라 무시됩니다")
         print(f"  [{status or 'ERR'}] {url}")
         print(f"        {len(body):>8,} bytes · {', '.join(verdict)}")
     print()
     if ok_any:
-        print("→ 정상입니다. 그대로 감시를 시작하면 됩니다: python3 cgv_imax_watch.py -v")
+        print(f"→ 정상입니다. 그대로 감시를 시작하면 됩니다: {PY_CMD} cgv_imax_watch.py -v")
         return 0
     print(
         "→ 쓸 만한 응답이 없습니다.\n"
