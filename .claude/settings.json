@@ -1,0 +1,13 @@
+{
+  "extraKnownMarketplaces": {
+    "korean-law-marketplace": {
+      "source": {
+        "source": "github",
+        "repo": "chrisryugj/korean-law-mcp"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "korean-law@korean-law-marketplace": true
+  }
+}
