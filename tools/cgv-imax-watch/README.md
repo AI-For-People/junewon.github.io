@@ -20,6 +20,7 @@ cd tools/cgv-imax-watch
 
 python3 cgv_imax_watch.py --selftest   # 탐지 로직 검증 (네트워크 불필요)
 python3 cgv_imax_watch.py --probe      # 어느 시간표 URL이 살아있는지 진단
+python3 cgv_imax_watch.py --test-notify # 텔레그램 알림이 오는지 확인
 python3 cgv_imax_watch.py --baseline   # 지금 열려 있는 회차를 기준선으로 기록
 python3 cgv_imax_watch.py -v           # 이후 새로 올라오는 것만 알림
 ```
@@ -93,22 +94,54 @@ JSON은 **구조적으로** 훑습니다. 어떤 객체의 조상 체인과 자�
 HTML로 폴백했을 때는 평문 근접 검색(제목 등장 위치 ±400자 안에 `IMAX`)을
 씁니다. DOM 선택자를 쓰지 않으므로 마크업 개편에 잘 버팁니다.
 
-## 알림 받기
+## 텔레그램 알림 설정
 
-환경변수만 넣으면 켜집니다. 아무것도 없으면 콘솔 출력 + 터미널 벨,
-macOS면 알림센터까지 자동으로 씁니다.
+예매 오픈은 대개 평일 낮에 뜹니다. 그때 터미널 앞에 앉아 있을 수는 없으니
+폰으로 받는 게 사실상 필수입니다. 3분이면 됩니다.
 
-```bash
-# 텔레그램 (@BotFather 로 봇 생성, @userinfobot 으로 chat id 확인)
-export TELEGRAM_BOT_TOKEN=123456:AA...
-export TELEGRAM_CHAT_ID=12345678
+**1. 봇 만들기** — 텔레그램에서 [@BotFather](https://t.me/BotFather) 를 찾아
+`/newbot` 을 보냅니다. 이름과 아이디(`_bot` 으로 끝나야 함)를 정하면
+`123456789:AAH...` 형태의 **토큰**을 줍니다.
 
-# 또는 디스코드/슬랙 웹훅
-export WEBHOOK_URL=https://discord.com/api/webhooks/...
+**2. 내 Chat ID 알아내기** — [@userinfobot](https://t.me/userinfobot) 에게
+아무 말이나 걸면 `Id: 12345678` 을 알려줍니다.
+
+**3. 만든 봇에게 먼저 말 걸기** — 1번에서 만든 봇을 검색해 `/start` 를
+보냅니다. **이 단계를 빠뜨리면 봇이 나에게 메시지를 못 보냅니다**
+(텔레그램은 사용자가 먼저 대화를 시작한 상대에게만 봇 발신을 허용합니다).
+
+**4. 값 넣고 확인**
+
+```powershell
+# Windows PowerShell
+$env:TELEGRAM_BOT_TOKEN = "123456789:AAH..."
+$env:TELEGRAM_CHAT_ID   = "12345678"
+python cgv_imax_watch.py --test-notify
 ```
 
-**폰으로 받으려면 텔레그램을 권합니다.** 예매 오픈은 보통 새벽이나 업무
-시간에 뜨는데, 터미널 벨은 그때 못 듣습니다.
+```bash
+# macOS / Linux
+export TELEGRAM_BOT_TOKEN='123456789:AAH...'
+export TELEGRAM_CHAT_ID='12345678'
+python3 cgv_imax_watch.py --test-notify
+```
+
+`[OK] 텔레그램: 전송 완료` 와 함께 폰에 메시지가 오면 끝입니다. 실패하면
+원인을 짚어 줍니다 — 토큰이 틀렸는지, chat id가 틀렸는지, 3번을 안 했는지.
+
+**5. 매번 입력하기 귀찮으면** 딸려 있는 실행 스크립트를 쓰세요.
+
+```powershell
+copy run-watch.example.ps1 run-watch.ps1   # macOS/Linux 는 run-watch.example.sh
+notepad run-watch.ps1                       # 토큰 두 줄 채우기
+.\run-watch.ps1
+```
+
+알림 경로를 먼저 확인하고, 정상일 때만 감시를 시작합니다. 토큰이 든
+`run-watch.ps1` 은 `.gitignore` 에 있어 커밋되지 않습니다 — **이 저장소는
+공개이니 토큰을 파일에 적어 올리지 마세요.**
+
+디스코드나 슬랙을 쓰신다면 `WEBHOOK_URL` 하나만 넣으면 됩니다.
 
 ## 옵션
 
@@ -124,6 +157,7 @@ export WEBHOOK_URL=https://discord.com/api/webhooks/...
 | `--dump` | — | 응답 원문을 파일로 저장하고 종료 |
 | `--once` | — | 한 번만 확인하고 종료 (cron 용) |
 | `--baseline` | — | 알림 없이 현재 상태만 기록하고 종료 |
+| `--test-notify` | — | 알림 경로 점검 (테스트 메시지 발송) |
 | `--state` | `~/.cgv_imax_watch.json` | 이미 알린 항목 기록 |
 
 ## 백그라운드로 계속 돌리기

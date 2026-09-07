@@ -1,0 +1,6 @@
+# 토큰이 들어가는 실행 스크립트 — 저장소가 공개이므로 절대 커밋하지 않는다
+run-watch.ps1
+run-watch.sh
+# 감시 상태 파일과 덤프
+*.json
+!package.json

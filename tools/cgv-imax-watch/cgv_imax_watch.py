@@ -299,6 +299,58 @@ def save_state(path: str, state: dict) -> None:
 # 알림
 # --------------------------------------------------------------------------
 
+def send_telegram(text: str) -> tuple[bool, str]:
+    """텔레그램으로 보낸다. (성공 여부, 사람이 읽을 설명)."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        return False, "TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 가 설정되지 않았습니다"
+    payload = urllib.parse.urlencode({"chat_id": chat_id, "text": text}).encode()
+    try:
+        with urllib.request.urlopen(
+            urllib.request.Request(
+                f"https://api.telegram.org/bot{token}/sendMessage", data=payload
+            ),
+            timeout=10,
+        ) as resp:
+            result = json.loads(resp.read().decode("utf-8", "replace"))
+        if result.get("ok"):
+            return True, "전송 완료"
+        return False, f"텔레그램이 거부했습니다: {result.get('description', result)}"
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = json.loads(exc.read().decode("utf-8", "replace")).get("description", "")
+        except Exception:
+            pass
+        hint = ""
+        if exc.code == 401:
+            hint = " → 봇 토큰이 틀렸습니다"
+        elif exc.code == 400 and "chat not found" in detail.lower():
+            hint = " → chat id가 틀렸거나, 봇에게 먼저 말을 걸지 않았습니다"
+        return False, f"HTTP {exc.code} {detail}{hint}"
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def send_webhook(text: str) -> tuple[bool, str]:
+    """Discord / Slack 웹훅으로 보낸다."""
+    webhook = os.environ.get("WEBHOOK_URL")
+    if not webhook:
+        return False, "WEBHOOK_URL 이 설정되지 않았습니다"
+    payload = json.dumps({"content": text, "text": text}).encode()
+    try:
+        urllib.request.urlopen(
+            urllib.request.Request(
+                webhook, data=payload, headers={"Content-Type": "application/json"}
+            ),
+            timeout=10,
+        ).read()
+        return True, "전송 완료"
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
 def notify(subject: str, body: str, quiet: bool = False) -> None:
     """콘솔 + (환경변수가 있으면) 텔레그램 / 웹훅 + macOS 알림센터."""
     print(f"\n{'=' * 60}\n{subject}\n{body}\n{'=' * 60}", flush=True)
@@ -306,35 +358,16 @@ def notify(subject: str, body: str, quiet: bool = False) -> None:
         sys.stdout.write("\a\a\a")  # 터미널 벨
         sys.stdout.flush()
 
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-    if token and chat_id:
-        payload = urllib.parse.urlencode(
-            {"chat_id": chat_id, "text": f"{subject}\n{body}"}
-        ).encode()
-        try:
-            urllib.request.urlopen(
-                urllib.request.Request(
-                    f"https://api.telegram.org/bot{token}/sendMessage", data=payload
-                ),
-                timeout=10,
-            ).read()
-        except Exception as exc:
-            print(f"[warn] 텔레그램 전송 실패: {exc}", file=sys.stderr)
-
-    webhook = os.environ.get("WEBHOOK_URL")  # Discord / Slack 공통
-    if webhook:
-        content = f"**{subject}**\n{body}"
-        payload = json.dumps({"content": content, "text": content}).encode()
-        try:
-            urllib.request.urlopen(
-                urllib.request.Request(
-                    webhook, data=payload, headers={"Content-Type": "application/json"}
-                ),
-                timeout=10,
-            ).read()
-        except Exception as exc:
-            print(f"[warn] 웹훅 전송 실패: {exc}", file=sys.stderr)
+    text = f"{subject}\n{body}"
+    for label, sender, configured in (
+        ("텔레그램", send_telegram, os.environ.get("TELEGRAM_BOT_TOKEN")),
+        ("웹훅", send_webhook, os.environ.get("WEBHOOK_URL")),
+    ):
+        if not configured:
+            continue
+        ok, detail = sender(text)
+        if not ok:
+            print(f"[warn] {label} 전송 실패: {detail}", file=sys.stderr)
 
     if sys.platform == "darwin":
         try:
@@ -352,6 +385,37 @@ def notify(subject: str, body: str, quiet: bool = False) -> None:
             )
         except Exception:
             pass
+
+
+def run_test_notify() -> int:
+    """알림 경로가 실제로 살아있는지 확인한다. 감시 전에 한 번 돌려볼 것."""
+    text = (
+        "🎬 CGV IMAX 감시기 테스트 알림입니다.\n"
+        "이 메시지가 보이면 알림 설정이 정상입니다."
+    )
+    any_configured = False
+    failed = 0
+    for label, sender, env in (
+        ("텔레그램", send_telegram, "TELEGRAM_BOT_TOKEN"),
+        ("웹훅", send_webhook, "WEBHOOK_URL"),
+    ):
+        if not os.environ.get(env):
+            print(f"  [건너뜀] {label}: {env} 없음")
+            continue
+        any_configured = True
+        ok, detail = sender(text)
+        print(f"  [{'OK' if ok else '실패'}] {label}: {detail}")
+        failed += not ok
+
+    if not any_configured:
+        print(
+            "\n설정된 알림 경로가 없습니다. 텔레그램을 쓰려면 두 값이 필요합니다:\n"
+            "  TELEGRAM_BOT_TOKEN  @BotFather 에서 봇을 만들면 나오는 토큰\n"
+            "  TELEGRAM_CHAT_ID    @userinfobot 에게 아무 말이나 걸면 알려주는 Id"
+        )
+        return 1
+    print("\n" + ("전부 정상입니다." if not failed else "실패한 경로가 있습니다."))
+    return 1 if failed else 0
 
 
 # --------------------------------------------------------------------------
@@ -738,6 +802,11 @@ def parse_args(argv=None):
     )
     p.add_argument("--probe", action="store_true", help="엔드포인트 생존 진단")
     p.add_argument("--selftest", action="store_true", help="네트워크 없이 탐지 로직 검증")
+    p.add_argument(
+        "--test-notify",
+        action="store_true",
+        help="알림 경로가 살아있는지 테스트 메시지를 보내본다",
+    )
     p.add_argument("--dump", metavar="FILE", help="응답 원문을 파일로 저장하고 종료")
     p.add_argument("--dump-offset", type=int, default=0, help="--dump 할 날짜 (오늘+N일)")
     p.add_argument("--quiet", action="store_true", help="터미널 벨 끄기")
@@ -754,6 +823,8 @@ def main(argv=None) -> int:
 
     if args.selftest:
         return run_selftest()
+    if args.test_notify:
+        return run_test_notify()
     if args.probe:
         return run_probe(args)
     if args.dump:
