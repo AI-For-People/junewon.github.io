@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import base64
 import datetime as dt
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from fx_newsletter import cards, commentary, fetch, indicators, mailer
 from fx_newsletter.config import MailConfig
@@ -166,21 +168,35 @@ class RenderAndMailTest(unittest.TestCase):
             self.assertEqual(paths[0].name, "01-cover.png")
             self.assertEqual(paths[-1].name, "06-outlook.png")
 
-    def test_message_embeds_every_card_inline(self):
-        config = MailConfig(
+    def _smtp_config(self):
+        return MailConfig(
+            provider="smtp",
+            sender_name="주간 환율 브리핑",
+            sender_address="me@example.com",
+            recipients=("me@example.com",),
             host="smtp.gmail.com",
             port=465,
             user="me@example.com",
-            password="app pass word",
-            sender_name="주간 환율 브리핑",
-            recipients=("me@example.com",),
+            password="apppassword",
         )
+
+    def _resend_config(self):
+        return MailConfig(
+            provider="resend",
+            sender_name="주간 환율 브리핑",
+            sender_address="onboarding@resend.dev",
+            recipients=("me@example.com",),
+            resend_api_key="re_test",
+        )
+
+    def test_smtp_message_embeds_every_card_inline(self):
+        config = self._smtp_config()
         with tempfile.TemporaryDirectory() as tmp:
             paths = cards.render_all(self.snapshots, self.note, END, Path(tmp))
             message = mailer.build_message(config, self.snapshots, self.note, END, paths)
 
         self.assertIn(self.note.headline, message["Subject"])
-        self.assertEqual(message["To"], "me@example.com")
+        self.assertEqual(message["From"], "주간 환율 브리핑 <me@example.com>")
 
         html_parts = [p for p in message.walk() if p.get_content_type() == "text/html"]
         images = [p for p in message.walk() if p.get_content_type() == "image/png"]
@@ -189,15 +205,113 @@ class RenderAndMailTest(unittest.TestCase):
 
         html = html_parts[0].get_content()
         for part in images:
-            cid = part["Content-ID"].strip("<>")
-            self.assertIn(f"cid:{cid}", html)
+            self.assertIn(f"cid:{part['Content-ID'].strip('<>')}", html)
 
         plain = [p for p in message.walk() if p.get_content_type() == "text/plain"][0].get_content()
-        self.assertIn("주간 환율 브리핑", plain)
         for snapshot in self.snapshots:
             self.assertIn(snapshot.display_name, plain)
 
-    def test_mail_config_strips_app_password_spaces(self):
+    def test_resend_payload_shape(self):
+        config = self._resend_config()
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = cards.render_all(self.snapshots, self.note, END, Path(tmp))
+            inline = mailer.resend_payload(config, self.snapshots, self.note, END, paths, True)
+            plain = mailer.resend_payload(config, self.snapshots, self.note, END, paths, False)
+
+        self.assertEqual(inline["to"], ["me@example.com"])
+        self.assertEqual(inline["from"], "주간 환율 브리핑 <onboarding@resend.dev>")
+        self.assertEqual(len(inline["attachments"]), len(paths))
+
+        # 인라인 요청은 content_id를 달고 HTML이 그것을 cid:로 참조한다.
+        for attachment in inline["attachments"]:
+            self.assertIn("content_id", attachment)
+            self.assertIn(f"cid:{attachment['content_id']}", inline["html"])
+            # content는 base64 문자열이어야 한다.
+            base64.b64decode(attachment["content"], validate=True)
+
+        # 첨부 전용 요청에는 content_id도 img 태그도 없다.
+        for attachment in plain["attachments"]:
+            self.assertNotIn("content_id", attachment)
+        self.assertNotIn("<img", plain["html"])
+        self.assertIn("첨부파일", plain["html"])
+
+    def test_resend_sends_inline_on_success(self):
+        config = self._resend_config()
+        calls = []
+
+        def fake_post(api_key, payload):
+            calls.append((api_key, payload))
+            return SimpleNamespace(status_code=200, text="{}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = cards.render_all(self.snapshots, self.note, END, Path(tmp))
+            mailer.send_via_resend(config, self.snapshots, self.note, END, paths, post=fake_post)
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "re_test")
+        self.assertIn("content_id", calls[0][1]["attachments"][0])
+
+    def test_resend_falls_back_to_attachment_only_on_4xx(self):
+        """content_id를 모르는 API라도 메일은 나가야 한다."""
+        config = self._resend_config()
+        calls = []
+
+        def fake_post(api_key, payload):
+            calls.append(payload)
+            if "content_id" in payload["attachments"][0]:
+                return SimpleNamespace(status_code=422, text="unknown field content_id")
+            return SimpleNamespace(status_code=200, text="{}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = cards.render_all(self.snapshots, self.note, END, Path(tmp))
+            mailer.send_via_resend(config, self.snapshots, self.note, END, paths, post=fake_post)
+
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("content_id", calls[1]["attachments"][0])
+        self.assertNotIn("<img", calls[1]["html"])
+
+    def test_resend_raises_on_server_error(self):
+        config = self._resend_config()
+
+        def fake_post(api_key, payload):
+            return SimpleNamespace(status_code=500, text="boom")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = cards.render_all(self.snapshots, self.note, END, Path(tmp))
+            with self.assertRaises(mailer.SendError):
+                mailer.send_via_resend(config, self.snapshots, self.note, END, paths, post=fake_post)
+
+    def test_resend_does_not_retry_a_rejected_attachment_only_send(self):
+        """첨부 전용까지 거부당하면 조용히 성공한 척하지 않고 실패시킨다."""
+        config = self._resend_config()
+        calls = []
+
+        def fake_post(api_key, payload):
+            calls.append(payload)
+            return SimpleNamespace(status_code=422, text="nope")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = cards.render_all(self.snapshots, self.note, END, Path(tmp))
+            with self.assertRaises(mailer.SendError):
+                mailer.send_via_resend(config, self.snapshots, self.note, END, paths, post=fake_post)
+        self.assertEqual(len(calls), 2)
+
+    def test_env_picks_resend_when_key_present(self):
+        import os
+
+        os.environ.update({"RESEND_API_KEY": "re_x", "FX_MAIL_TO": "a@b.com"})
+        try:
+            config = MailConfig.from_env()
+        finally:
+            for key in ("RESEND_API_KEY", "FX_MAIL_TO"):
+                os.environ.pop(key, None)
+
+        self.assertEqual(config.provider, "resend")
+        self.assertEqual(config.sender_address, "onboarding@resend.dev")
+        self.assertEqual(config.recipients, ("a@b.com",))
+        self.assertEqual(config.validate(), [])
+
+    def test_env_falls_back_to_smtp_and_strips_app_password_spaces(self):
         import os
 
         os.environ.update(
@@ -208,14 +322,23 @@ class RenderAndMailTest(unittest.TestCase):
         finally:
             for key in ("FX_SMTP_USER", "FX_SMTP_PASSWORD"):
                 os.environ.pop(key, None)
+
+        self.assertEqual(config.provider, "smtp")
         self.assertEqual(config.password, "abcdefghijklmnop")
+        # 발신·수신 주소가 모두 SMTP 사용자로 채워진다.
+        self.assertEqual(config.sender_address, "a@b.com")
         self.assertEqual(config.recipients, ("a@b.com",))
         self.assertEqual(config.validate(), [])
 
-    def test_mail_config_reports_missing_fields(self):
-        config = MailConfig("h", 465, "", "", "n", ())
+    def test_validate_reports_missing_per_provider(self):
+        resend = MailConfig(provider="resend", sender_name="n", sender_address="", recipients=())
         self.assertEqual(
-            set(config.validate()), {"FX_SMTP_USER", "FX_SMTP_PASSWORD", "FX_MAIL_TO"}
+            set(resend.validate()), {"FX_MAIL_TO", "FX_MAIL_FROM", "RESEND_API_KEY"}
+        )
+        smtp = MailConfig(provider="smtp", sender_name="n", sender_address="", recipients=())
+        self.assertEqual(
+            set(smtp.validate()),
+            {"FX_MAIL_TO", "FX_MAIL_FROM", "FX_SMTP_USER", "FX_SMTP_PASSWORD"},
         )
 
 

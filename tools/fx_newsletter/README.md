@@ -5,7 +5,7 @@ GitHub Actions에서 돌아가므로 별도 서버가 필요 없다.
 
 ## 무엇이 오는가
 
-카드 6장이 메일 본문에 인라인으로 들어온다.
+카드 6장이 메일 본문에 인라인으로 들어온다 (인라인이 불가하면 첨부로 들어온다).
 
 | 순서 | 카드 | 내용 |
 |---|---|---|
@@ -32,26 +32,49 @@ ECB는 EUR 기준으로 고시하므로 EUR 기준 시계열을 한 번만 받�
 
 ## 설정
 
-### 1. GitHub Secrets 등록
+### 1. 발송 수단 고르기
+
+두 가지 중 하나를 고른다. `RESEND_API_KEY`가 등록돼 있으면 Resend를 쓰고,
+없으면 Gmail SMTP로 떨어진다.
+
+| | Resend (권장) | Gmail SMTP |
+|---|---|---|
+| 등록할 열쇠 | API 키 | 앱 비밀번호 |
+| 그 열쇠의 권한 | **발송만** | 발송 + **받은편지함 읽기** |
+| 추가 가입 | 필요 | 불필요 |
+
+받은편지함 읽기 권한까지 넘기지 않아도 되므로 Resend를 권한다.
+
+### 2. GitHub Secrets 등록
 
 저장소 → Settings → Secrets and variables → Actions → New repository secret.
 
+**Resend를 쓸 때**
+
 | 이름 | 필수 | 설명 |
 |---|---|---|
-| `FX_SMTP_USER` | ✅ | 보내는 Gmail 주소 (예: `you@gmail.com`) |
-| `FX_SMTP_PASSWORD` | ✅ | Gmail **앱 비밀번호** 16자리 (계정 비밀번호 아님) |
-| `FX_MAIL_TO` | | 받는 주소. 생략하면 `FX_SMTP_USER`로 보냄. 쉼표로 여러 명 지정 가능 |
-| `ANTHROPIC_API_KEY` | | 있으면 Claude가 해설을 쓴다. 없으면 지표 기반 문장으로 자동 대체 |
+| `RESEND_API_KEY` | ✅ | Resend 대시보드에서 발급한 `re_`로 시작하는 키 |
+| `FX_MAIL_TO` | ✅ | 받는 주소. 쉼표로 여러 명 지정 가능 |
+| `FX_MAIL_FROM` | | 보내는 주소. 생략하면 `onboarding@resend.dev` |
+| `ANTHROPIC_API_KEY` | | 있으면 Claude가 해설을 쓴다. 없으면 지표 기반 문장으로 대체 |
 
-### 2. Gmail 앱 비밀번호 발급
+> 도메인을 등록하지 않았다면 `onboarding@resend.dev`가 기본 발신 주소가 된다.
+> 이 주소는 **Resend 계정에 등록한 본인 메일로만** 보낼 수 있다. 다른 주소로
+> 보내려면 Resend에 도메인을 등록하고 `FX_MAIL_FROM`을 그 도메인 주소로 지정한다.
+
+**Gmail SMTP를 쓸 때**
+
+| 이름 | 필수 | 설명 |
+|---|---|---|
+| `FX_SMTP_USER` | ✅ | 보내는 Gmail 주소 |
+| `FX_SMTP_PASSWORD` | ✅ | Gmail **앱 비밀번호** 16자리 (계정 비밀번호 아님) |
+| `FX_MAIL_TO` | | 생략하면 `FX_SMTP_USER`로 보냄 |
+| `ANTHROPIC_API_KEY` | | 위와 같음 |
 
 앱 비밀번호는 2단계 인증이 켜져 있어야 만들 수 있다.
-
-1. [Google 계정 보안](https://myaccount.google.com/security)에서 2단계 인증을 켠다.
-2. [앱 비밀번호](https://myaccount.google.com/apppasswords)로 이동한다.
-3. 앱 이름을 아무거나 (예: `fx-newsletter`) 적고 생성한다.
-4. 나온 16자리를 `FX_SMTP_PASSWORD`에 넣는다. 표시된 공백은 넣어도 되고 안 넣어도 된다
-   (코드에서 공백을 제거한다).
+[Google 계정 보안](https://myaccount.google.com/security)에서 2단계 인증을 켠 뒤
+[앱 비밀번호](https://myaccount.google.com/apppasswords)에서 발급한다. 표시된
+공백은 넣어도 되고 안 넣어도 된다 (코드에서 제거한다).
 
 ### 3. Actions 활성화 확인
 
@@ -90,10 +113,14 @@ sudo apt-get install -y fonts-nanum        # 한글 폰트. macOS는 기본 폰�
 python -m fx_newsletter.main --dry-run --out build/fx-cards
 
 # 실제 발송
-export FX_SMTP_USER=you@gmail.com
-export FX_SMTP_PASSWORD='앱비밀번호16자리'
+export RESEND_API_KEY=re_...
+export FX_MAIL_TO=you@gmail.com
 export ANTHROPIC_API_KEY=sk-ant-...
 python -m fx_newsletter.main
+
+# Gmail SMTP로 보내려면 RESEND_API_KEY 대신
+export FX_SMTP_USER=you@gmail.com
+export FX_SMTP_PASSWORD='앱비밀번호16자리'
 ```
 
 주요 옵션:
@@ -123,7 +150,7 @@ tools/fx_newsletter/
 ├── indicators.py   이동평균 · RSI · 볼린저 · 변동성 · 추세 판정
 ├── commentary.py   Claude 해설 생성 + 규칙 기반 대체
 ├── cards.py        Pillow로 1080x1080 PNG 렌더링
-├── mailer.py       인라인 이미지 메일 조립 및 SMTP 발송
+├── mailer.py       메일 본문 조립, Resend·SMTP 발송
 └── main.py         파이프라인 진입점 (CLI)
 ```
 
@@ -133,6 +160,8 @@ tools/fx_newsletter/
   지수 백오프로 재시도한다.
 - Claude 호출이 실패하거나 키가 없으면 지표 기반 문장으로 조용히 대체된다.
   해설이 밋밋해질 뿐 뉴스레터는 나간다.
+- Resend가 인라인 이미지(`content_id`) 요청을 거부하면 첨부 전용으로 한 번
+  다시 보낸다. 카드가 본문에 안 박히는 것보다 메일이 아예 안 가는 쪽이 나쁘다.
 
 반대로 환율 데이터를 아예 못 받으면 그때는 실패로 끝낸다. 틀린 숫자를 보내느니
 안 보내는 편이 낫기 때문이다.
@@ -152,7 +181,7 @@ Claude 해설이 그 통화까지 써 준다.
 ## 비용
 
 - 환율 데이터: 무료
-- Gmail 발송: 무료
+- 메일 발송: Resend 무료 티어 또는 Gmail 모두 이 사용량(주 1통)에서는 무료
 - GitHub Actions: 퍼블릭 저장소 무료. 1회 실행 약 1~2분
 - Claude API: 주 1회, 입력 2천 토큰 안팎의 짧은 호출이라 월 단위로도 소액이다
 

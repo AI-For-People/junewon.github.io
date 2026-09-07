@@ -99,8 +99,8 @@ def run(args: argparse.Namespace) -> int:
         log.error("메일 설정 누락: %s", ", ".join(missing))
         return 2
 
-    message = mailer.build_message(config, snapshots, note, issued, card_paths)
-    mailer.send(config, message)
+    log.info("발송 수단: %s -> %s", config.provider, ", ".join(config.recipients))
+    mailer.send(config, snapshots, note, issued, card_paths)
     return 0
 
 
