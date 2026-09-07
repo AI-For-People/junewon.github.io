@@ -180,7 +180,7 @@ def _collect_times(node, out: set) -> None:
         _collect_times(child, out)
 
 
-def find_matches_json(data, titles: list[str], screen: str) -> list[str]:
+def find_matches_json(data, titles: list[str], screen: str) -> list[tuple[str, list]]:
     """JSON을 구조적으로 훑는다.
 
     어떤 객체의 '조상 체인 + 자기 자신'의 스칼라 값들 안에 제목과 상영관
@@ -189,7 +189,7 @@ def find_matches_json(data, titles: list[str], screen: str) -> list[str]:
     """
     needles = [squash(t) for t in titles if t.strip()]
     screen_needle = squash(screen)
-    hits: list[str] = []
+    hits: list[tuple[str, list]] = []
     seen: set[int] = set()
 
     def walk(node, ancestor_ctx: str) -> None:
@@ -201,7 +201,9 @@ def find_matches_json(data, titles: list[str], screen: str) -> list[str]:
             seen.add(id(node))
             times: set[str] = set()
             _collect_times(node, times)
-            hits.append(", ".join(sorted(times)[:12]) if times else "시간 미확인")
+            ordered = sorted(times)
+            summary = ", ".join(ordered[:12]) if ordered else "시간 미확인"
+            hits.append((summary, ordered))
             return  # 자식까지 중복해서 담지 않는다
         children = node.values() if isinstance(node, dict) else node
         for child in children:
@@ -211,7 +213,9 @@ def find_matches_json(data, titles: list[str], screen: str) -> list[str]:
     return hits
 
 
-def find_matches_text(body: str, titles: list[str], screen: str, window: int = 400) -> list[str]:
+def find_matches_text(
+    body: str, titles: list[str], screen: str, window: int = 400
+) -> list[tuple[str, list]]:
     """HTML용. 제목이 등장하는 구간 주변에 상영관 표기가 같이 있는지 본다.
 
     페이지 어딘가에 IMAX 배너가 있다고 해서 그 영화의 IMAX 회차가 열린 건
@@ -222,7 +226,7 @@ def find_matches_text(body: str, titles: list[str], screen: str, window: int = 4
     index_map = [i for i, ch in enumerate(text) if not ch.isspace()]
 
     screen_needle = squash(screen)
-    hits: list[str] = []
+    hits: list[tuple[str, list]] = []
     for title in titles:
         needle = squash(title)
         if not needle:
@@ -242,12 +246,14 @@ def find_matches_text(body: str, titles: list[str], screen: str, window: int = 4
             seats = SEAT_RE.search(chunk)
             if seats:
                 summary += f"  (잔여석 표기 {seats.group(0)})"
-            hits.append(summary)
+            hits.append((summary, times))
     return hits
 
 
-def find_matches(body: str, titles, screen: str, window: int = 400) -> list[str]:
+def find_matches(body: str, titles, screen: str, window: int = 400) -> list[tuple[str, list]]:
     """JSON이면 구조적으로, 아니면 평문 근접 검색으로 판단한다.
+
+    (요약 문자열, 상영 시각 목록) 쌍의 리스트를 돌려준다.
 
     titles 는 같은 영화의 표기 후보 목록이다. CGV는 같은 작품을 한글로도
     영어로도('오디세이' / 'The Odyssey') 담고, 상영관 표기를 제목 앞에
@@ -388,9 +394,26 @@ def fetch_schedule(args, theater: str, datestr: str) -> tuple[str, str]:
     return "", tried
 
 
+def diff_times(entry: dict | None, current: list[str]) -> tuple[list[str], list[str]]:
+    """(새로 생긴 회차, 합쳐서 기억할 회차)를 돌려준다.
+
+    응답이 일시적으로 부실해도 아는 회차를 잃지 않도록 기억은 합집합으로
+    유지한다. 알림은 '새로 생긴 것'에 대해서만 울린다.
+    """
+    known = set(entry.get("times", [])) if entry else set()
+    added = [t for t in current if t not in known]
+    return added, sorted(known | set(current))
+
+
 def check_once(args, state: dict) -> list[str]:
-    """전 극장 × 전 날짜를 한 바퀴 돌고, 새로 발견한 항목의 알림 문구를 반환."""
+    """전 극장 × 전 날짜를 한 바퀴 돌고, 새로 발견한 회차의 알림 문구를 반환.
+
+    (극장, 날짜)가 처음 나타났을 때뿐 아니라, 이미 아는 날짜에 회차가
+    **추가**됐을 때도 알린다. CGV는 같은 날짜에 회차를 나중에 더 붙이기도
+    하므로, 날짜 단위로만 기억하면 그 증편을 통째로 놓친다.
+    """
     today = dt.date.today()
+    now = dt.datetime.now().isoformat(timespec="seconds")
     fresh: list[str] = []
 
     for theater in args.theaters:
@@ -405,22 +428,39 @@ def check_once(args, state: dict) -> list[str]:
                 continue
 
             hits = find_matches(body, args.titles, args.screen)
+            if not hits:
+                if args.verbose:
+                    print(f"[--] {name} {datestr}: 없음", file=sys.stderr)
+                time.sleep(args.gap)
+                continue
+
             key = f"{theater}|{datestr}"
-            if hits:
-                if not state["seen"].get(key):
-                    state["seen"][key] = {
-                        "found_at": dt.datetime.now().isoformat(timespec="seconds"),
-                        "times": hits,
-                    }
-                    fresh.append(
-                        f"{name} · {date:%Y-%m-%d (%a)}\n"
-                        f"  회차: {' / '.join(hits[:3])}\n"
-                        f"  예매: {BOOKING_URL}"
-                    )
-                elif args.verbose:
-                    print(f"[ok] {name} {datestr}: 이미 알림 완료", file=sys.stderr)
+            entry = state["seen"].get(key)
+            current = sorted({t for _, times in hits for t in times})
+            added, merged = diff_times(entry, current)
+            state["seen"][key] = {
+                "first_seen": (entry or {}).get("first_seen", now),
+                "last_seen": now,
+                "times": merged,
+            }
+
+            if args.baseline:
+                if args.verbose:
+                    print(f"[기준선] {name} {datestr}: {len(current)}개 회차 기록", file=sys.stderr)
+            elif entry is None:
+                fresh.append(
+                    f"🆕 {name} · {date:%Y-%m-%d (%a)} 예매 오픈\n"
+                    f"  회차: {', '.join(current) if current else hits[0][0]}\n"
+                    f"  예매: {BOOKING_URL}"
+                )
+            elif added:
+                fresh.append(
+                    f"➕ {name} · {date:%Y-%m-%d (%a)} 회차 추가\n"
+                    f"  추가된 회차: {', '.join(added)}\n"
+                    f"  예매: {BOOKING_URL}"
+                )
             elif args.verbose:
-                print(f"[--] {name} {datestr}: 없음 ({used})", file=sys.stderr)
+                print(f"[ok] {name} {datestr}: 변화 없음 ({len(current)}개)", file=sys.stderr)
 
             time.sleep(args.gap)
 
@@ -527,8 +567,8 @@ def run_dump(args) -> int:
     target = " / ".join(args.titles)
     if hits:
         print(f"\n✅ 이 응답에서 '{target}' + {args.screen} 매치 {len(hits)}건:")
-        for hit in hits[:5]:
-            print(f"    · {hit}")
+        for summary, _ in hits[:5]:
+            print(f"    · {summary}")
     else:
         print(f"\n❌ 이 응답에서는 '{target}' + {args.screen} 를 찾지 못했습니다.")
         print("   위 목록에 해당 영화가 보이면 --title 로 그 표기를 그대로 넘겨주세요.")
@@ -623,12 +663,28 @@ def run_selftest() -> int:
         print("  [FAIL] 공백 변형 매칭")
         failed += 1
 
-    times = find_matches(api_open, ["오디세이"], "IMAX")
-    if times and "19:30" in times[0] and "22:40" in times[0]:
+    hits = find_matches(api_open, ["오디세이"], "IMAX")
+    times = [t for _, ts in hits for t in ts]
+    if "19:30" in times and "22:40" in times:
         print("  [PASS] API 시각 표기(1930 → 19:30) 변환")
     else:
-        print(f"  [FAIL] API 시각 표기 변환 — {times}")
+        print(f"  [FAIL] API 시각 표기 변환 — {hits}")
         failed += 1
+
+    # 증분 판정: 처음 발견 / 회차 추가 / 변화 없음 / 응답이 부실해진 경우
+    diff_cases = [
+        ("처음 발견", None, ["19:30"], ["19:30"], ["19:30"]),
+        ("회차 추가", {"times": ["19:30"]}, ["19:30", "22:40"], ["22:40"], ["19:30", "22:40"]),
+        ("변화 없음", {"times": ["19:30"]}, ["19:30"], [], ["19:30"]),
+        ("응답이 일부만 와도 기억 유지", {"times": ["19:30", "22:40"]}, ["19:30"], [], ["19:30", "22:40"]),
+    ]
+    for label, entry, current, want_added, want_merged in diff_cases:
+        added, merged = diff_times(entry, current)
+        if added == want_added and merged == want_merged:
+            print(f"  [PASS] 증분 판정 — {label}")
+        else:
+            print(f"  [FAIL] 증분 판정 — {label}: added={added}, merged={merged}")
+            failed += 1
 
     print("\n셀프테스트: " + ("전부 통과" if not failed else f"{failed}건 실패"))
     return 1 if failed else 0
@@ -656,7 +712,7 @@ def parse_args(argv=None):
         default="0013,0059",
         help="극장 코드(siteNo) 쉼표 구분 (기본: 0013 용산, 0059 영등포)",
     )
-    p.add_argument("--days", type=int, default=30, help="오늘부터 며칠치를 볼지 (기본 30)")
+    p.add_argument("--days", type=int, default=40, help="오늘부터 며칠치를 볼지 (기본 40)")
     p.add_argument("--interval", type=int, default=300, help="확인 주기(초, 기본 300)")
     p.add_argument("--gap", type=float, default=0.4, help="요청 사이 간격(초, 기본 0.4)")
     p.add_argument("--timeout", type=float, default=15.0, help="요청 타임아웃(초)")
@@ -674,6 +730,12 @@ def parse_args(argv=None):
         help="이미 알린 항목을 기억할 파일",
     )
     p.add_argument("--once", action="store_true", help="한 번만 확인하고 종료 (cron 용)")
+    p.add_argument(
+        "--baseline",
+        action="store_true",
+        help="지금 올라와 있는 회차를 알림 없이 기준선으로 기록하고 종료. "
+        "첫 실행 때 이미 열린 날짜가 한꺼번에 알림으로 쏟아지는 걸 막는다",
+    )
     p.add_argument("--probe", action="store_true", help="엔드포인트 생존 진단")
     p.add_argument("--selftest", action="store_true", help="네트워크 없이 탐지 로직 검증")
     p.add_argument("--dump", metavar="FILE", help="응답 원문을 파일로 저장하고 종료")
@@ -712,6 +774,15 @@ def main(argv=None) -> int:
             print(f"[error] 확인 중 오류: {exc}", file=sys.stderr)
             fresh = []
 
+        if args.baseline:
+            save_state(args.state, state)
+            recorded = sum(len(v.get("times", [])) for v in state["seen"].values())
+            print(
+                f"기준선 기록 완료: {len(state['seen'])}개 날짜, 회차 {recorded}개.\n"
+                f"이제부터 새로 올라오는 것만 알립니다 → {PY_CMD} cgv_imax_watch.py -v"
+            )
+            return 0
+
         if fresh:
             save_state(args.state, state)
             notify(
@@ -720,8 +791,9 @@ def main(argv=None) -> int:
                 quiet=args.quiet,
             )
         else:
+            save_state(args.state, state)
             print(
-                f"[{started:%m-%d %H:%M:%S}] {targets} · {label} 아직 없음"
+                f"[{started:%m-%d %H:%M:%S}] {targets} · {label} 변화 없음"
                 f" (다음 확인 {args.interval}초 후)",
                 flush=True,
             )
