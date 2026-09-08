@@ -54,9 +54,12 @@ jobs:
       - name: 카드 생성 및 발송
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # 발송 수단: RESEND_API_KEY가 있으면 Resend, 없으면 Gmail SMTP.
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          FX_MAIL_FROM: ${{ secrets.FX_MAIL_FROM }}
+          FX_MAIL_TO: ${{ secrets.FX_MAIL_TO }}
           FX_SMTP_USER: ${{ secrets.FX_SMTP_USER }}
           FX_SMTP_PASSWORD: ${{ secrets.FX_SMTP_PASSWORD }}
-          FX_MAIL_TO: ${{ secrets.FX_MAIL_TO }}
         run: |
           python -m fx_newsletter.main \
             --out "$GITHUB_WORKSPACE/build/fx-cards" \
