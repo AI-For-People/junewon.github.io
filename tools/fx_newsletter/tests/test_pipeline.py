@@ -330,6 +330,58 @@ class RenderAndMailTest(unittest.TestCase):
         self.assertEqual(config.recipients, ("a@b.com",))
         self.assertEqual(config.validate(), [])
 
+    def test_unset_github_secrets_arrive_as_empty_strings(self):
+        """GitHub Actions는 등록되지 않은 secret을 빈 문자열로 정의해 넘긴다.
+
+        워크플로가 env에 나열한 모든 이름이 항상 존재하되 값만 비어 있는
+        상태를 그대로 재현한다. 선택 항목이 비어 있다고 해서 발송이
+        막히면 안 된다.
+        """
+        import os
+
+        workflow_env = {
+            "ANTHROPIC_API_KEY": "",
+            "RESEND_API_KEY": "re_live_key",
+            "FX_MAIL_FROM": "",       # 등록하지 않은 선택 항목
+            "FX_MAIL_TO": "me@example.com",
+            "FX_SMTP_USER": "",       # Resend를 쓰므로 비어 있음
+            "FX_SMTP_PASSWORD": "",
+        }
+        os.environ.update(workflow_env)
+        try:
+            config = MailConfig.from_env()
+        finally:
+            for key in workflow_env:
+                os.environ.pop(key, None)
+
+        self.assertEqual(config.provider, "resend")
+        self.assertEqual(config.sender_address, "onboarding@resend.dev")
+        self.assertEqual(config.sender_name, "주간 환율 브리핑")
+        self.assertEqual(config.recipients, ("me@example.com",))
+        self.assertEqual(config.validate(), [])
+
+    def test_empty_numeric_env_falls_back_to_default(self):
+        """빈 FX_SMTP_PORT가 int('')로 터지지 않아야 한다."""
+        import os
+
+        os.environ.update(
+            {
+                "FX_SMTP_USER": "me@example.com",
+                "FX_SMTP_PASSWORD": "pw",
+                "FX_SMTP_PORT": "",
+                "FX_SMTP_HOST": "",
+            }
+        )
+        try:
+            config = MailConfig.from_env()
+        finally:
+            for key in ("FX_SMTP_USER", "FX_SMTP_PASSWORD", "FX_SMTP_PORT", "FX_SMTP_HOST"):
+                os.environ.pop(key, None)
+
+        self.assertEqual(config.port, 465)
+        self.assertEqual(config.host, "smtp.gmail.com")
+        self.assertEqual(config.validate(), [])
+
     def test_validate_reports_missing_per_provider(self):
         resend = MailConfig(provider="resend", sender_name="n", sender_address="", recipients=())
         self.assertEqual(

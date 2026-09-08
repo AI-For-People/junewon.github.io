@@ -39,7 +39,13 @@ CLAUDE_MODEL = os.environ.get("FX_CLAUDE_MODEL", "claude-opus-5")
 
 
 def _env(name: str, default: str = "") -> str:
-    return os.environ.get(name, default).strip()
+    """환경 변수를 읽되 빈 값은 없는 것으로 본다.
+
+    GitHub Actions는 등록되지 않은 secret도 빈 문자열로 정의해서 넘긴다.
+    따라서 os.environ.get(name, default)는 기본값 대신 빈 문자열을 돌려주고,
+    선택 항목이 필수인 것처럼 취급되어 버린다.
+    """
+    return os.environ.get(name, "").strip() or default
 
 
 @dataclass(frozen=True)
