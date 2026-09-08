@@ -2,8 +2,9 @@ name: 주간 환율 카드뉴스
 
 on:
   schedule:
-    # UTC 기준. 일요일 23:00 UTC = 월요일 08:00 KST.
-    - cron: "0 23 * * 0"
+    # UTC 기준. 하루 전 23:00 UTC = 다음 날 08:00 KST.
+    # 일·목 23:00 UTC = 월·금 08:00 KST.
+    - cron: "0 23 * * 0,4"
   workflow_dispatch:
     inputs:
       dry_run:
